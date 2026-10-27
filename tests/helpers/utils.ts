@@ -8,7 +8,7 @@ export { prisma };
 /** Wipes all ledger data. Only ever runs against the *_test database (enforced in vitest.config.ts). */
 export async function resetDb() {
   if (!/_test(\?|$)/.test(process.env.DATABASE_URL ?? '')) throw new Error('Refusing to truncate a non-test database');
-  await prisma.$executeRawUnsafe('TRUNCATE TABLE transactions, transfers, accounts CASCADE');
+  await prisma.$executeRawUnsafe('TRUNCATE TABLE idempotency_keys, transactions, transfers, accounts CASCADE');
 }
 
 export async function createAccount(name = 'Alice') {

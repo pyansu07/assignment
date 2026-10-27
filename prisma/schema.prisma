@@ -1,0 +1,68 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum TransactionType {
+  credit
+  debit
+
+  @@map("transaction_type")
+}
+
+model Account {
+  id        String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  name      String   @db.VarChar(100)
+  balance   Decimal  @default(0) @db.Decimal(19, 4)
+  createdAt DateTime @default(dbgenerated("clock_timestamp()")) @map("created_at") @db.Timestamptz(6)
+
+  transactions      Transaction[]
+  outgoingTransfers Transfer[]    @relation("TransferSource")
+  incomingTransfers Transfer[]    @relation("TransferDestination")
+
+  @@map("accounts")
+}
+
+model Transaction {
+  id          String          @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  accountId   String          @map("account_id") @db.Uuid
+  type        TransactionType
+  amount      Decimal         @db.Decimal(19, 4)
+  description String          @db.VarChar(500)
+  referenceId String          @map("reference_id") @db.VarChar(100)
+  transferId  String?         @map("transfer_id") @db.Uuid
+  createdAt   DateTime        @default(dbgenerated("clock_timestamp()")) @map("created_at") @db.Timestamptz(6)
+
+  account  Account   @relation(fields: [accountId], references: [id], onDelete: Restrict)
+  transfer Transfer? @relation(fields: [transferId], references: [id], onDelete: Restrict)
+
+  // reference_id is unique per account (the same reference may be used on another account).
+  @@unique([accountId, referenceId])
+  // A transfer has exactly one debit leg and one credit leg.
+  @@unique([transferId, type])
+  @@index([accountId, createdAt(sort: Desc), id(sort: Desc)])
+  @@index([accountId, type, createdAt(sort: Desc), id(sort: Desc)])
+  @@map("transactions")
+}
+
+model Transfer {
+  id                   String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  sourceAccountId      String   @map("source_account_id") @db.Uuid
+  destinationAccountId String   @map("destination_account_id") @db.Uuid
+  amount               Decimal  @db.Decimal(19, 4)
+  description          String   @db.VarChar(500)
+  referenceId          String   @map("reference_id") @db.VarChar(100)
+  createdAt            DateTime @default(dbgenerated("clock_timestamp()")) @map("created_at") @db.Timestamptz(6)
+
+  sourceAccount      Account       @relation("TransferSource", fields: [sourceAccountId], references: [id], onDelete: Restrict)
+  destinationAccount Account       @relation("TransferDestination", fields: [destinationAccountId], references: [id], onDelete: Restrict)
+  entries            Transaction[]
+
+  // Transfer idempotency: one transfer per (source account, reference_id).
+  @@unique([sourceAccountId, referenceId])
+  @@map("transfers")
+}

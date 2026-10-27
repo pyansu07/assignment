@@ -18,5 +18,16 @@ export const amountSchema = z
     if (!isPositiveMoney(v)) return fail('amount must be greater than 0');
   });
 
+/** Optional `Idempotency-Key` header: when present it must be non-blank and at most 255 characters. */
+export const idempotencyKeySchema = z
+  .string({ invalid_type_error: 'Idempotency-Key must be a string' })
+  .trim()
+  .min(1, 'Idempotency-Key must not be blank')
+  .max(255, 'Idempotency-Key must be at most 255 characters')
+  .optional();
+
+/** Parse with `idempotencyHeaderSchema.parse(req.headers)['idempotency-key']` so errors name the header. */
+export const idempotencyHeaderSchema = z.object({ 'idempotency-key': idempotencyKeySchema });
+
 export const descriptionSchema = z.string().trim().min(1, 'description is required').max(500);
 export const referenceIdSchema = z.string().trim().min(1, 'reference_id is required').max(100);

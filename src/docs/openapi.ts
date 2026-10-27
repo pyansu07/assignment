@@ -5,6 +5,21 @@ const errorRef = (description: string) => ({
   content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } },
 });
 const accountIdParam = { name: 'accountId', in: 'path', required: true, schema: uuid };
+const idempotencyKeyHeader = {
+  name: 'Idempotency-Key',
+  in: 'header',
+  required: false,
+  schema: { type: 'string', minLength: 1, maxLength: 255 },
+  description:
+    'Optional. Retrying with the same key and identical payload replays the original 201 response (header Idempotent-Replayed: true) without executing again. The same key with a different payload returns 409 IDEMPOTENCY_KEY_REUSED. Scoped per account (the source account for transfers). Failed requests do not consume the key.',
+};
+const replayedHeader = {
+  'Idempotent-Replayed': {
+    description:
+      'Present with value "true" when the response is a replay of an earlier request with the same Idempotency-Key.',
+    schema: { type: 'string', enum: ['true'] },
+  },
+};
 
 export const openApiSpec = {
   openapi: '3.0.3',
@@ -64,7 +79,7 @@ export const openApiSpec = {
     '/accounts/{accountId}/transactions': {
       post: {
         summary: 'Create a credit or debit transaction (atomic with the balance update)',
-        parameters: [accountIdParam],
+        parameters: [accountIdParam, idempotencyKeyHeader],
         requestBody: {
           required: true,
           content: {
@@ -89,13 +104,14 @@ export const openApiSpec = {
         },
         responses: {
           '201': {
-            description: 'Created',
+            description: 'Created (or replayed: same Idempotency-Key and payload)',
+            headers: replayedHeader,
             content: { 'application/json': { schema: { $ref: '#/components/schemas/Transaction' } } },
           },
-          '400': errorRef('VALIDATION_ERROR / INVALID_JSON'),
+          '400': errorRef('VALIDATION_ERROR (incl. blank or >255 char Idempotency-Key) / INVALID_JSON'),
           '404': errorRef('ACCOUNT_NOT_FOUND'),
           '409': errorRef(
-            'INSUFFICIENT_BALANCE, DUPLICATE_REFERENCE (details.existing holds the original transaction; nothing changed) or BALANCE_LIMIT_EXCEEDED',
+            'INSUFFICIENT_BALANCE, DUPLICATE_REFERENCE (details.existing holds the original transaction; nothing changed), IDEMPOTENCY_KEY_REUSED (key already used with a different payload) or BALANCE_LIMIT_EXCEEDED',
           ),
         },
       },
@@ -139,7 +155,8 @@ export const openApiSpec = {
       post: {
         summary: 'Atomically transfer money between two accounts (bonus)',
         description:
-          'Writes one transfer row plus a linked debit and credit ledger entry (shared transfer_id) in a single DB transaction. Idempotent per (source_account_id, reference_id).',
+          'Writes one transfer row plus a linked debit and credit ledger entry (shared transfer_id) in a single DB transaction. Idempotent per (source_account_id, reference_id); the optional Idempotency-Key header adds replay semantics scoped to the source account.',
+        parameters: [idempotencyKeyHeader],
         requestBody: {
           required: true,
           content: {
@@ -161,12 +178,13 @@ export const openApiSpec = {
         },
         responses: {
           '201': {
-            description: 'Created',
+            description: 'Created (or replayed: same Idempotency-Key and payload)',
+            headers: replayedHeader,
             content: { 'application/json': { schema: { $ref: '#/components/schemas/Transfer' } } },
           },
-          '400': errorRef('VALIDATION_ERROR (incl. same source and destination)'),
+          '400': errorRef('VALIDATION_ERROR (incl. same source and destination, bad Idempotency-Key)'),
           '404': errorRef('ACCOUNT_NOT_FOUND'),
-          '409': errorRef('INSUFFICIENT_BALANCE or DUPLICATE_REFERENCE'),
+          '409': errorRef('INSUFFICIENT_BALANCE, DUPLICATE_REFERENCE or IDEMPOTENCY_KEY_REUSED'),
         },
       },
     },

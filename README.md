@@ -110,6 +110,30 @@ Failures: `400 VALIDATION_ERROR`, `404 ACCOUNT_NOT_FOUND`, `409 INSUFFICIENT_BAL
 }
 ```
 
+### Idempotency-Key (optional)
+
+Send an `Idempotency-Key` header to make a request safe to retry (network timeout, client crash). It is supported on `POST /accounts/{id}/transactions` and `POST /transfers`. Without the header, behavior is exactly as described above (only `reference_id` duplicate handling applies).
+
+```http
+POST /accounts/{accountId}/transactions
+Idempotency-Key: 7b1f3c52-order-1001
+{ "type": "debit", "amount": "30.00", "description": "Coffee machine", "reference_id": "inv-1001" }
+```
+
+| Situation                                                                             | Result                                                                                                                             |
+| ------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
+| New key                                                                               | Executes normally → `201`; the key is stored in the same DB transaction as the ledger change                                       |
+| Same key + identical payload (retry)                                                  | **Not executed again**; the original `201` body is returned with header `Idempotent-Replayed: true`. No new row, balance unchanged |
+| Same key + different payload (amount, type, description, `reference_id`, or accounts) | `409 IDEMPOTENCY_KEY_REUSED`; nothing changes                                                                                      |
+| Same key sent concurrently                                                            | Requests serialise on the account row lock: one executes, the rest replay its result (or get `409` if their payload differs)       |
+| Operation fails (e.g. `INSUFFICIENT_BALANCE`, duplicate `reference_id`, `404`)        | Everything rolls back **including the key**, so the key is not consumed and the request can be retried later                       |
+| Blank or longer than 255 characters                                                   | `400 VALIDATION_ERROR` (`field: "idempotency-key"`)                                                                                |
+
+- **Scope:** keys are unique per account (`UNIQUE (account_id, key)`), so two accounts can use the same key independently. For transfers the scope is the **source** account. Reusing one key for a transaction and a transfer on the same account counts as a different payload → `409`.
+- **What is stored:** the key, a SHA-256 fingerprint of the normalised request (`"10"` and `"10.00"` are the same amount) and the response body — never the raw request. Records are immutable (DB trigger).
+- **No expiry:** keys are kept indefinitely (see Limitations).
+- `reference_id` rules still apply on top: a _new_ key with an already-used `reference_id` returns `409 DUPLICATE_REFERENCE`.
+
 ### Balance
 
 `GET /accounts/{id}/balance` → `200 { "account_id": "…", "balance": "100.0000" }`
@@ -132,25 +156,26 @@ POST /transfers
 { "source_account_id": "…", "destination_account_id": "…", "amount": "30", "reference_id": "xfer-1", "description": "optional" }
 ```
 
-`201` → transfer object with `entries`: the linked `debit` (source) and `credit` (destination) ledger rows sharing `transfer_id`. Errors: `400` (validation, same account), `404`, `409 INSUFFICIENT_BALANCE`, `409 DUPLICATE_REFERENCE` (idempotent per source account + `reference_id`).
+`201` → transfer object with `entries`: the linked `debit` (source) and `credit` (destination) ledger rows sharing `transfer_id`. Errors: `400` (validation, same account), `404`, `409 INSUFFICIENT_BALANCE`, `409 DUPLICATE_REFERENCE` (idempotent per source account + `reference_id`), `409 IDEMPOTENCY_KEY_REUSED`. Accepts the optional `Idempotency-Key` header (see above).
 
 ### Errors
 
 Always `{ "error": { "code": "…", "message": "…", "details"?: … } }`.
 
-| Status | Codes                                                                     |
-| ------ | ------------------------------------------------------------------------- |
-| 400    | `VALIDATION_ERROR` (details = list of `{field, message}`), `INVALID_JSON` |
-| 404    | `ACCOUNT_NOT_FOUND`, `ROUTE_NOT_FOUND`                                    |
-| 409    | `INSUFFICIENT_BALANCE`, `DUPLICATE_REFERENCE`, `BALANCE_LIMIT_EXCEEDED`   |
-| 413    | `PAYLOAD_TOO_LARGE` (body > 10 kB)                                        |
-| 500    | `INTERNAL_ERROR` (details are logged server-side only)                    |
+| Status | Codes                                                                                             |
+| ------ | ------------------------------------------------------------------------------------------------- |
+| 400    | `VALIDATION_ERROR` (details = list of `{field, message}`), `INVALID_JSON`                         |
+| 404    | `ACCOUNT_NOT_FOUND`, `ROUTE_NOT_FOUND`                                                            |
+| 409    | `INSUFFICIENT_BALANCE`, `DUPLICATE_REFERENCE`, `IDEMPOTENCY_KEY_REUSED`, `BALANCE_LIMIT_EXCEEDED` |
+| 413    | `PAYLOAD_TOO_LARGE` (body > 10 kB)                                                                |
+| 500    | `INTERNAL_ERROR` (details are logged server-side only)                                            |
 
 ## Design & consistency guarantees
 
 - **Atomicity.** Each transaction/transfer runs in one DB transaction: lock account row(s) `FOR UPDATE` → insert ledger row → conditional balance update. Any failure rolls everything back.
 - **No overspending.** A debit is `UPDATE … SET balance = balance - $x WHERE balance >= $x`, run under the account row lock; a `CHECK (balance >= 0)` constraint is the backstop.
 - **Idempotency.** `UNIQUE (account_id, reference_id)` is the final arbiter; the insert uses `ON CONFLICT DO NOTHING`, so concurrent duplicates yield exactly one success.
+- **Idempotency-Key.** Optional header on transactions and transfers. The key lookup and the key insert run inside the same DB transaction as the ledger change, after the account row lock, so same-key requests cannot execute twice; `UNIQUE (account_id, key)` is the backstop and a rolled-back operation never reserves its key.
 - **Deadlock-free transfers.** Both account rows are locked in ascending id order.
 - **Exact money.** `NUMERIC(19,4)`; arithmetic happens in Postgres, never in JS floats. Input is validated by strict regex, never rounded.
 - **Immutability.** No mutation routes, FKs are `ON DELETE RESTRICT`, and DB triggers reject `UPDATE`/`DELETE` on `transactions` and `transfers`.
@@ -167,4 +192,4 @@ Runs against the real PostgreSQL database in `TEST_DATABASE_URL` (migrations are
 
 ## Limitations
 
-No authentication/authorization, rate limiting or multi-currency — this is an assessment implementation and should not be exposed publicly without access controls. See [Assumptions.md](Assumptions.md).
+Idempotency keys are stored forever (no expiry/cleanup job) and a failed request is never cached - only successful results are replayed. No authentication/authorization, rate limiting or multi-currency — this is an assessment implementation and should not be exposed publicly without access controls. See [Assumptions.md](Assumptions.md).

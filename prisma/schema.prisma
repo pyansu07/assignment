@@ -21,10 +21,29 @@ model Account {
   createdAt DateTime @default(dbgenerated("clock_timestamp()")) @map("created_at") @db.Timestamptz(6)
 
   transactions      Transaction[]
-  outgoingTransfers Transfer[]    @relation("TransferSource")
-  incomingTransfers Transfer[]    @relation("TransferDestination")
+  outgoingTransfers Transfer[]       @relation("TransferSource")
+  incomingTransfers Transfer[]       @relation("TransferDestination")
+  idempotencyKeys   IdempotencyKey[]
 
   @@map("accounts")
+}
+
+// Replay records for the optional Idempotency-Key header. Written in the SAME database
+// transaction as the ledger change, so a rolled-back operation never reserves its key.
+model IdempotencyKey {
+  id          String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  // Scope: the account the request is made against (the source account for transfers).
+  accountId   String   @map("account_id") @db.Uuid
+  key         String   @db.VarChar(255)
+  // SHA-256 of the normalised request (operation + payload); only this, never the raw request, is kept.
+  requestHash String   @map("request_hash") @db.VarChar(64)
+  response    Json
+  createdAt   DateTime @default(dbgenerated("clock_timestamp()")) @map("created_at") @db.Timestamptz(6)
+
+  account Account @relation(fields: [accountId], references: [id], onDelete: Restrict)
+
+  @@unique([accountId, key])
+  @@map("idempotency_keys")
 }
 
 model Transaction {
